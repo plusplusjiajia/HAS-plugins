@@ -1,0 +1,172 @@
+diff --git a/has/has-plugins/pom.xml b/has/has-plugins/pom.xml
+index 950011b..49d3983 100644
+--- a/has/has-plugins/pom.xml
++++ b/has/has-plugins/pom.xml
+@@ -11,8 +11,24 @@
+ 
+     <artifactId>has-plugins</artifactId>
+ 
++    <dependencyManagement>
++        <dependencies>
++            <dependency>
++                <groupId>com.amazonaws</groupId>
++                <artifactId>aws-java-sdk-bom</artifactId>
++                <version>1.11.22</version>
++                <type>pom</type>
++                <scope>import</scope>
++            </dependency>
++        </dependencies>
++    </dependencyManagement>
++
+     <dependencies>
+         <dependency>
++            <groupId>com.amazonaws</groupId>
++            <artifactId>aws-java-sdk-iam</artifactId>
++        </dependency>
++        <dependency>
+             <groupId>org.apache.kerby</groupId>
+             <artifactId>has-common</artifactId>
+             <version>${project.version}</version>
+diff --git a/has/has-plugins/src/main/java/org/apache/kerby/has/plugins/client/aws/AwsClientPlugin.java b/has/has-plugins/src/main/java/org/apache/kerby/has/plugins/client/aws/AwsClientPlugin.java
+new file mode 100644
+index 0000000..8a98c74
+--- /dev/null
++++ b/has/has-plugins/src/main/java/org/apache/kerby/has/plugins/client/aws/AwsClientPlugin.java
+@@ -0,0 +1,47 @@
++package org.apache.kerby.has.plugins.client.aws;
++
++import org.apache.kerby.has.client.AbstractHasClientPlugin;
++import org.apache.kerby.has.client.HasLoginException;
++import org.apache.kerby.kerberos.kerb.type.base.AuthToken;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++import java.util.Date;
++
++public class AwsClientPlugin extends AbstractHasClientPlugin {
++    public static final Logger LOG = LoggerFactory.getLogger(AwsClientPlugin.class);
++
++    /**
++     * {@inheritDoc}
++     */
++    @Override
++    public String getLoginType() {
++        return "IAM";
++    }
++
++    @Override
++    protected void doLogin(AuthToken authToken) throws HasLoginException {
++
++        //Get the ak info from env
++        String accessKey = System.getenv("accessKey");
++        String secretKey = System.getenv("secretKey");
++        String userName = System.getenv("user");
++
++        LOG.debug("Get the ak successful.");
++
++        authToken.setIssuer("has");
++        authToken.setSubject(userName);
++
++        final Date now = new Date(new Date().getTime() / 1000 * 1000);
++        authToken.setIssueTime(now);
++        // Set expiration in 60 minutes
++        Date exp = new Date(now.getTime() + 1000 * 60 * 60);
++        authToken.setExpirationTime(exp);
++
++        authToken.addAttribute("accessKey", accessKey);
++        authToken.addAttribute("secretKey", secretKey);
++        authToken.addAttribute("userName", userName);
++
++        authToken.addAttribute("passPhrase", accessKey + secretKey);
++    }
++}
+diff --git a/has/has-plugins/src/main/java/org/apache/kerby/has/plugins/server/aws/AwsServerPlugin.java b/has/has-plugins/src/main/java/org/apache/kerby/has/plugins/server/aws/AwsServerPlugin.java
+new file mode 100644
+index 0000000..7f32019
+--- /dev/null
++++ b/has/has-plugins/src/main/java/org/apache/kerby/has/plugins/server/aws/AwsServerPlugin.java
+@@ -0,0 +1,64 @@
++package org.apache.kerby.has.plugins.server.aws;
++
++import com.amazonaws.AmazonServiceException;
++import com.amazonaws.ClientConfiguration;
++import com.amazonaws.auth.AWSCredentials;
++import com.amazonaws.auth.BasicAWSCredentials;
++import com.amazonaws.services.identitymanagement.AmazonIdentityManagementClient;
++import com.amazonaws.services.identitymanagement.model.GetUserResult;
++import org.apache.kerby.has.server.AbstractHasServerPlugin;
++import org.apache.kerby.has.server.HasAuthenException;
++import org.apache.kerby.kerberos.kerb.type.base.AuthToken;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++public class AwsServerPlugin extends AbstractHasServerPlugin {
++    public static final Logger LOG = LoggerFactory.getLogger(AwsServerPlugin.class);
++
++    /**
++     * {@inheritDoc}
++     */
++    @Override
++    public String getLoginType() {
++        return "IAM";
++    }
++
++    /**
++     * {@inheritDoc}
++     */
++    @Override
++    public void doAuthenticate(AuthToken userToken, AuthToken authToken)
++        throws HasAuthenException {
++
++        String accessKey = (String) userToken.getAttributes().get("accessKey");
++        String secretKey = (String) userToken.getAttributes().get("secretKey");
++        String userName = (String) userToken.getAttributes().get("userName");
++
++        try {
++            ClientConfiguration clientCfg = new ClientConfiguration();
++
++            AWSCredentials credentials = new BasicAWSCredentials(accessKey,
++                secretKey);
++
++            AmazonIdentityManagementClient iam = new AmazonIdentityManagementClient(credentials, clientCfg);
++            GetUserResult user = iam.getUser();
++            if (userName.equals(user.getUser().getUserName())) {
++
++                System.out.println("user: " + userName);
++                authToken.setIssuer(userToken.getIssuer());
++                authToken.setSubject(userName);
++                authToken.setExpirationTime(userToken.getExpiredTime());
++                authToken.addAttribute("passPhrase", accessKey + secretKey);
++            } else {
++                LOG.error("Failed.");
++                throw new HasAuthenException("Authentication failed. With wrong user name.");
++            }
++
++        } catch (AmazonServiceException e) {
++            LOG.error("Failed.");
++            LOG.error("Error code: " + e.getErrorCode());
++            LOG.error("Error message: " + e.getErrorMessage());
++            throw new HasAuthenException("Authentication failed." + e.getMessage());
++        }
++    }
++}
+diff --git a/has/has-plugins/src/main/resources/META-INF/services/org.apache.hadoop.has.client.HasClientPlugin b/has/has-plugins/src/main/resources/META-INF/services/org.apache.hadoop.has.client.HasClientPlugin
+index 09697dc..6020d3a 100644
+--- a/has/has-plugins/src/main/resources/META-INF/services/org.apache.hadoop.has.client.HasClientPlugin
++++ b/has/has-plugins/src/main/resources/META-INF/services/org.apache.hadoop.has.client.HasClientPlugin
+@@ -13,3 +13,4 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
++org.apache.kerby.has.plugins.client.aws.AwsClientPlugin
+\ No newline at end of file
+diff --git a/has/has-plugins/src/main/resources/META-INF/services/org.apache.hadoop.has.server.HasServerPlugin b/has/has-plugins/src/main/resources/META-INF/services/org.apache.hadoop.has.server.HasServerPlugin
+index 09697dc..4f8efbe 100644
+--- a/has/has-plugins/src/main/resources/META-INF/services/org.apache.hadoop.has.server.HasServerPlugin
++++ b/has/has-plugins/src/main/resources/META-INF/services/org.apache.hadoop.has.server.HasServerPlugin
+@@ -13,3 +13,4 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
++org.apache.kerby.has.plugins.server.aws.AwsServerPlugin
+\ No newline at end of file
